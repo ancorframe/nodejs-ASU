@@ -1,137 +1,109 @@
-const {
-  BadRequest,
-  Conflict,
-  Unauthorized,
-  NotFound,
-} = require("../../helpers/errors");
+const { ErrorConstructor } = require("../../helpers/errors");
 const {
   registerUser,
   loginUser,
   logoutUser,
-  updateSubscription,
-  updateAvatar,
-  verificationUser,
-  verifyUser,
-  forgotPasswordUser,
-  restorePasswordUser,
-} = require("../services/usersService");
+  currentUser,
+} = require("../../services/auth/usersService");
 
 const registerUserController = async (req, res) => {
-  const { email, password } = req.body;
+  const { body } = req;
   try {
-    const register = await registerUser(email, password);
-    res.status(201).json({ email: register });
+    await registerUser(body);
+    res.status(201).json({ message: "successful" });
   } catch (error) {
-    throw new Conflict();
+    throw new ErrorConstructor(409, "User is already registered");
   }
 };
 
 const loginUserController = async (req, res) => {
-  const { email, password } = req.body;
+  const { body } = req;
+  const device = req?.cookies.device_Id;
   try {
-    const login = await loginUser(email, password);
-    res.json({ ...login });
+    const { token, refreshToken, deviceId, userData } = await loginUser(
+      body,
+      device
+    );
+    res.cookie("tokenJWT", token, {
+      httpOnly: true,
+      // secure: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      // secure: true,
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+    res.cookie("device_Id", deviceId, {
+      httpOnly: true,
+      // secure: true,
+    });
+    res.json({ user: userData });
   } catch (error) {
-    throw new Unauthorized("Email or password is wrong");
+    throw new ErrorConstructor(error.status, error.message);
   }
 };
 
 const logoutUserController = async (req, res) => {
-  const { _id } = req.user;
-  await logoutUser(_id);
-  res.status(204).json({});
+  const deviceId = req.cookies.device_Id;
+  const { _id: id } = req.user;
+  try {
+    await logoutUser(deviceId, id);
+    res.clearCookie("tokenJWT");
+    res.clearCookie("refreshToken");
+    res.status(204).json({ message: "successful" });
+  } catch (error) {
+    throw new ErrorConstructor(409, "User is not logged in");
+  }
 };
 
 const currentUserController = async (req, res) => {
-  const { email, subscription, token, avatarURL } = req.user;
-  res.json({ user: { email, subscription, avatarURL }, token });
-};
-
-const updateSubscriptionController = async (req, res) => {
-  const { _id } = req.user;
-  const { subscription } = req.body;
-  if (!subscription) {
-    throw new BadRequest("missing field subscription");
-  }
+  const deviceId = req.cookies.device_Id;
+  const user = req.user;
   try {
-    await updateSubscription(_id, subscription);
-    res.json({
-      message: `subscription updated to: ${subscription}`,
-      subscription,
+    const { token, refreshToken } = await currentUser(user, deviceId);
+    res.cookie("tokenJWT", token, {
+      httpOnly: true,
+      // secure: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 1 hour
     });
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      // secure: true,
+      maxAge:  24 * 60 * 60 * 1000, // 15 min
+    });
+    res.json({ user });
   } catch (error) {
-    throw new BadRequest(
-      "subscription can be only ['starter', 'pro', 'business']"
-    );
+    throw new ErrorConstructor(409, "Unauthorized");
   }
 };
 
-const updateAvatarController = async (req, res) => {
-  const filename = req.file.filename;
-  if (!filename) {
-    throw new BadRequest("missing required field ");
-  }
+const refreshTokenController = async (req, res) => {
+  const deviceId = req.cookies.device_Id;
+  const user = req.user;
   try {
-    const url = await updateAvatar(req, filename);
-    res.json({ avatarURL: `${url}` });
+    const { token, refreshToken } = await currentUser(user, deviceId);
+    res.cookie("tokenJWT", token, {
+      httpOnly: true,
+      // secure: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 1 hour
+    });
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      // secure: true,
+      maxAge:  24 * 60 * 60 * 1000, // 15 min
+    });
+    res.json({ message: "successful" });
   } catch (error) {
-    throw new BadRequest("Something wrong( Try again");
+    throw new ErrorConstructor(409, "Unauthorized");
   }
 };
 
-const verificationUserController = async (req, res) => {
-  const { verificationToken } = req.params;
-  if (!verificationToken) {
-    throw new NotFound("Something wrong(. Try again");
-  }
-  try {
-    await verificationUser(verificationToken);
-    res.json({ message: "Verification successful" });
-  } catch (error) {
-    throw new NotFound("User not found");
-  }
-};
-
-const verifyUserController = async (req, res) => {
-  const { email } = req.body;
-  try {
-    await verifyUser(email);
-    res.json({ message: "Verification email sent" });
-  } catch (error) {
-    throw new BadRequest("Verification has already been passed");
-  }
-};
-
-const forgotPasswordUserController = async (req, res) => {
-  const { email } = req.body;
-  try {
-    await forgotPasswordUser(email);
-    res.json({ message: "Restore email sent" });
-  } catch (error) {
-    throw new BadRequest("Something wrong( Try again");
-  }
-};
-
-const restorePasswordUserController = async (req, res) => {
-  const { _id } = req.user;
-  const { password } = req.body;
-  try {
-    await restorePasswordUser(_id, password);
-  } catch (error) {
-    throw new BadRequest("Something wrong( Try again");
-  }
-  res.json({ message: "Password was change" });
-};
 
 module.exports = {
   registerUserController,
   loginUserController,
   logoutUserController,
   currentUserController,
-  updateSubscriptionController,
-  updateAvatarController,
-  verificationUserController,
-  verifyUserController,
-  forgotPasswordUserController,
-  restorePasswordUserController,
+  refreshTokenController,
 };

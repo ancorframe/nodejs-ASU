@@ -1,164 +1,120 @@
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
-const { User } = require("../db/userModel");
-const path = require("path");
-const { avatarFormater } = require("../helpers/avatarFormater");
-const { verification, restorePassword } = require("../helpers/emailSender");
-const fs = require("fs").promises;
-const sha256 = require("sha256");
+const { User } = require("../../db/models/auth/userModel");
+const { Whitelist } = require("../../db/models/auth/whitelistModel");
+const { ErrorConstructor } = require("../../helpers/errors");
+const { Token } = require("../../db/models/auth/tokenModel");
 const { v4: uuidv4 } = require("uuid");
+const { randomTokenString } = require("../../helpers/randomTokenString");
 
-const UI_URL = process.env.UI_URL;
-const SERVER_URL = process.env.SERVER_URL;
+const secret = process.env.JWT_SECRET_KEY;
 
-const registerUser = async (email, password) => {
-  const secret = process.env.JWT_SECRET_KEY;
-  const verificationToken = sha256.x2(email + secret);
-  const user = new User({ email, password, verificationToken });
-  await user.save();
-  const send = await verification({
-    to: email,
-    link: `${UI_URL}/verify/${verificationToken}`,
-  });
-  if (!send) {
-    throw new Error();
+const registerUser = async (body) => {
+  const { fullName, password, email } = body;
+  const checkWhitelist = await Whitelist.findOne({ email:  email });
+  if (!checkWhitelist) {
+    throw new ErrorConstructor(403, "Access denied");
   }
+  const user = new User({
+    fullName,
+    email,
+    password,
+  });
+  await user.save();
   return user.email;
 };
 
-const loginUser = async (email, password) => {
-  const user = await User.findOne({ email, verify: true });
+const loginUser = async (body, deviceId) => {
+  const user = await User.findOne({ email: body.email });
   if (!user) {
-    throw new Error();
+    throw new ErrorConstructor(404, "User not found");
   }
-  const decodePassword = await bcrypt.compare(password, user.password);
+  const decodePassword = await bcrypt.compare(body.password, user.password);
   if (!decodePassword) {
-    throw new Error();
+    throw new ErrorConstructor(401, "Incorrect password");
   }
-  const token = jwt.sign(
-    { _id: user._id, email: user.email },
-    process.env.JWT_SECRET_KEY
+  const token = jwt.sign({ id: user._id, email: user.email }, secret);
+  const refreshToken = randomTokenString();
+  const { fullName, email, banned, _id } = user;
+  const userData = {
+    _id,
+    email,
+    banned,
+    fullName,
+  };
+  const tokenDb = await Token.findOne({ deviceId, owner: user._id });
+  if (!deviceId || !tokenDb) {
+    const deviceId = uuidv4();
+    const newToken = new Token({
+      token,
+      refreshToken,
+      deviceId,
+      owner: user._id,
+    });
+    await newToken.save();
+    return { token, refreshToken, deviceId, userData };
+  }
+  tokenDb.token = token;
+  tokenDb.refreshToken = refreshToken;
+  await tokenDb.save();
+  return { token, refreshToken, deviceId, userData };
+};
+
+const logoutUser = async (deviceId, id) => {
+  await Token.findOneAndUpdate(
+    { deviceId, owner: id },
+    { $set: { token: "null", refreshToken: "null" } }
   );
-  const updateUser = await User.findByIdAndUpdate(user._id, {
-    $set: { token },
-  });
-  if (!updateUser) {
-    throw new Error();
-  }
-  const { subscription, avatarURL } = user;
-  return { user: { email: user.email, subscription, avatarURL }, token };
 };
 
-const logoutUser = async (_id) => {
-  await User.findByIdAndUpdate(_id, {
-    $set: { token: null },
-  });
-};
-
-const updateSubscription = async (_id, subscription) => {
-  const update = await User.findByIdAndUpdate(_id, {
-    $set: { subscription },
-  });
-  return update;
-};
-
-const updateAvatar = async (req, filename) => {
-  const { user } = req;
-  const { _id: id } = user;
-  const prevAvatar = user.avatarURL;
-  if (user.avatarURL.includes(id)) {
-    const splitUrl = prevAvatar.split("/");
-    const avatarName = splitUrl.filter((i) => i.includes(id));
-    const oldPath = path.resolve(`./public/avatars/${avatarName}`);
-    await fs.unlink(oldPath);
-  }
-  const newAvatar = `${id}.${uuidv4()}.jpg`;
-  const FILE_DESTINATION = path.resolve(`./public/avatars/${newAvatar}`);
-  const FILE_READ = path.resolve(`./tmp/${filename}`);
-  avatarFormater(FILE_READ, FILE_DESTINATION);
-  const avatarURL = `${SERVER_URL}/avatars/${newAvatar}`;
-  await User.findByIdAndUpdate(id, {
-    $set: { avatarURL },
-  });
-  await fs.unlink(FILE_READ);
-  return avatarURL;
-};
-
-const verificationUser = async (verificationToken) => {
-  const user = await User.findOne({ verificationToken, verify: false });
-  if (!user) {
-    throw new Error();
-  }
-  await User.findByIdAndUpdate(user._id, {
-    $set: { verificationToken: "verify", verify: true },
-  });
-  // return user;
-};
-
-const verifyUser = async (email) => {
-  const user = await User.findOne({ email, verify: false });
-  if (!user) {
-    throw new Error();
-  }
-  const send = await verification({
-    to: email,
-    link: `${UI_URL}/verify/${user.verificationToken}`,
-  });
-  if (!send) {
-    throw new Error();
-  }
-  return user;
-};
-
-const forgotPasswordUser = async (email) => {
-  const user = await User.findOne({ email, verify: true });
-  if (!user) {
-    throw new Error();
-  }
-  const token = jwt.sign(
-    { _id: user._id, email: user.email },
-    process.env.JWT_SECRET_KEY
+const currentUser = async (user, deviceId) => {
+  const token = jwt.sign({ id: user._id, email: user.email }, secret);
+  const refreshToken = randomTokenString();
+  await Token.findOneAndUpdate(
+    { deviceId, owner: user._id },
+    { $set: { token, refreshToken } }
   );
-  const updateUser = await User.findByIdAndUpdate(user.id, {
-    $set: { token },
-  });
-  if (!updateUser) {
-    throw new Error();
-  }
-  const send = await restorePassword({
-    to: email,
-    link: `${UI_URL}/restorePassword/${token}`,
-  });
-  if (!send) {
-    throw new Error();
-  }
-  return user;
+  return { token, refreshToken };
 };
 
-const restorePasswordUser = async (_id, password) => {
-  const user = await User.findOne({ _id, verify: true });
-  if (!user) {
-    throw new Error();
-  }
-  // const updatePasswordUser = await User.findByIdAndUpdate(user.id, {
-  //   $set: { password },
-  // });
-  // if (!updatePasswordUser) {
-  //   throw new Error();
-  // }
-  user.password = password;
-  user.save();
-  return user;
-};
+// const forgotPasswordUser = async (email) => {
+//   const user = await User.findOne({ email, verify: true });
+//   if (!user) {
+//     throw new Error();
+//   }
+//   const token = jwt.sign(
+//     { _id: user._id, email: user.email },
+//     process.env.JWT_SECRET_KEY
+//   );
+//   const updateUser = await User.findByIdAndUpdate(user.id, {
+//     $set: { token },
+//   });
+//   if (!updateUser) {
+//     throw new Error();
+//   }
+//   const send = await restorePassword({
+//     to: email,
+//     link: `${UI_URL}/restorePassword/${token}`,
+//   });
+//   if (!send) {
+//     throw new Error();
+//   }
+//   return user;
+// };
+
+// const restorePasswordUser = async (_id, password) => {
+//   const user = await User.findOne({ _id, verify: true });
+//   if (!user) {
+//     throw new Error();
+//   }
+//   user.password = password;
+//   user.save();
+//   return user;
+// };
 
 module.exports = {
   registerUser,
   loginUser,
   logoutUser,
-  updateSubscription,
-  updateAvatar,
-  verificationUser,
-  verifyUser,
-  forgotPasswordUser,
-  restorePasswordUser,
+  currentUser,
 };

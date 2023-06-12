@@ -1,4 +1,4 @@
-const { NotFound } = require("./errors");
+const { ErrorConstructor } = require("./errors");
 
 const asyncWrapper = (controller) => {
   return (req, res, next) => {
@@ -7,8 +7,8 @@ const asyncWrapper = (controller) => {
 };
 
 const errorHandler = (err, req, res, next) => {
-  if (err instanceof NotFound) {
-    res.status(err.status).json({ message: err.message });
+  if (err instanceof ErrorConstructor) {
+    return res.status(err.status).json({ message: err.message });
   }
   res.status(500).json({ message: err.message });
 };
